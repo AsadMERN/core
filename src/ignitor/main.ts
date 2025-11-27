@@ -1,0 +1,160 @@
+/*
+ * @adonisjs/core
+ *
+ * (c) AdonisJS
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+import debug from '../debug.ts'
+import { AceProcess } from './ace.ts'
+import { TestRunnerProcess } from './test.ts'
+import { HttpServerProcess } from './http.ts'
+import { setApp } from '../../services/app.ts'
+import { Application } from '../../modules/app.ts'
+import type { AppEnvironments } from '../../types/app.ts'
+import type { ApplicationService, IgnitorOptions } from '../types.ts'
+
+/**
+ * Ignitor is used to instantiate an AdonisJS application in different
+ * known environments. It serves as the main entry point for creating
+ * and managing application processes.
+ *
+ * @example
+ * const ignitor = new Ignitor(new URL(import.meta.url))
+ *
+ * // For HTTP server
+ * await ignitor.httpServer().start()
+ *
+ * // For CLI commands
+ * await ignitor.ace().handle(process.argv.slice(2))
+ *
+ * // For tests
+ * await ignitor.testRunner().run(() => {})
+ */
+export class Ignitor {
+  /**
+   * Ignitor options
+   */
+  #options: IgnitorOptions
+
+  /**
+   * Application root URL
+   */
+  #appRoot: URL
+
+  /**
+   * Reference to the application instance created using
+   * the "createApp" method.
+   *
+   * We store the output of the last call made to "createApp" method
+   * and assume that in one process only one entrypoint will
+   * call this method.
+   */
+  #app?: ApplicationService
+
+  /**
+   * Reference to the created application
+   */
+  #tapCallbacks: Set<(app: ApplicationService) => void> = new Set()
+
+  /**
+   * Creates a new Ignitor instance
+   *
+   * @param appRoot - The root URL of the application
+   * @param options - Configuration options for the ignitor
+   */
+  constructor(appRoot: URL, options: IgnitorOptions = {}) {
+    this.#appRoot = appRoot
+    this.#options = options
+  }
+
+  /**
+   * Runs all the tap callbacks
+   */
+  #runTapCallbacks(app: ApplicationService) {
+    this.#tapCallbacks.forEach((tapCallback) => tapCallback(app))
+  }
+
+  /**
+   * Get access to the application instance created
+   * by either the http server process or the ace
+   * process
+   */
+  getApp() {
+    return this.#app
+  }
+
+  /**
+   * Create an instance of AdonisJS application
+   *
+   * @param environment - The environment in which to create the app (web, console, test, repl)
+   */
+  createApp(environment: AppEnvironments) {
+    debug('creating application instance')
+    this.#app = new Application(this.#appRoot, { environment, importer: this.#options.importer })
+
+    setApp(this.#app)
+    this.#runTapCallbacks(this.#app)
+    return this.#app
+  }
+
+  /**
+   * Tap to access the application class instance.
+   *
+   * @param callback - Callback function to execute when app is created
+   */
+  tap(callback: (app: ApplicationService) => void): this {
+    this.#tapCallbacks.add(callback)
+    return this
+  }
+
+  /**
+   * Get instance of the HTTPServerProcess
+   */
+  httpServer() {
+    return new HttpServerProcess(this)
+  }
+
+  /**
+   * Get an instance of the AceProcess class
+   */
+  ace() {
+    return new AceProcess(this)
+  }
+
+  /**
+   * Get an instance of the TestRunnerProcess class
+   */
+  testRunner() {
+    return new TestRunnerProcess(this)
+  }
+
+  /**
+   * Terminates the app by calling the "app.terminate"
+   * method
+   */
+  async terminate() {
+    await this.#app?.terminate()
+  }
+}
+
+/**
+ * Pretty prints an error with colorful output using
+ * Youch terminal
+ */
+export async function prettyPrintError(error: any) {
+  if (error && typeof error === 'object' && error.code === 'E_DUMP_DIE_EXCEPTION') {
+    console.error(error)
+    return
+  }
+
+  try {
+    const { Youch } = await import('youch')
+    const youch = new Youch()
+    console.error(await youch.toANSI(error))
+  } catch {
+    console.error(error)
+  }
+}

@@ -1,0 +1,385 @@
+/*
+ * @adonisjs/core
+ *
+ * (c) AdonisJS
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+import { writeFile } from 'node:fs/promises'
+
+import { Config } from '../modules/config.ts'
+import { Logger } from '../modules/logger.ts'
+import { Application } from '../modules/app.ts'
+import { emitRouteTypes } from '../src/utils.ts'
+import { Dumper } from '../modules/dumper/dumper.ts'
+import { RuntimeException } from '../src/exceptions.ts'
+import { Router, Server } from '../modules/http/main.ts'
+import { BaseEvent, Emitter } from '../modules/events.ts'
+import { Encryption } from '../modules/encryption/main.ts'
+import { configProvider } from '../src/config_provider.ts'
+import type { ApplicationService, LoggerService } from '../src/types.ts'
+import BodyParserMiddleware from '../modules/bodyparser/bodyparser_middleware.ts'
+
+/**
+ * The Application Service provider registers all the baseline
+ * features required to run the framework.
+ *
+ * This provider handles the registration of core services including:
+ * - Application instance
+ * - Logger and logger manager
+ * - Configuration
+ * - Event emitter
+ * - Encryption service
+ * - HTTP server and router
+ * - Body parser middleware
+ * - Dumper for debugging
+ * - Test utilities and ACE kernel
+ *
+ * @example
+ * const provider = new AppServiceProvider(app)
+ * provider.register()
+ * await provider.boot()
+ * await provider.ready()
+ */
+export default class AppServiceProvider {
+  /**
+   * Application service provider constructor
+   *
+   * @param app - The application service instance
+   */
+  constructor(protected app: ApplicationService) {}
+
+  /**
+   * Registers test utils with the container
+   *
+   * Creates a singleton binding for 'testUtils' that lazily imports
+   * and instantiates the TestUtils class when first accessed.
+   *
+   * @example
+   * const testUtils = await app.container.make('testUtils')
+   * testUtils.createHttpContext()
+   */
+  protected registerTestUtils() {
+    this.app.container.singleton('testUtils', async () => {
+      const { TestUtils } = await import('../src/test_utils/main.js')
+      return new TestUtils(this.app)
+    })
+  }
+
+  /**
+   * Registers ace with the container
+   *
+   * Creates a singleton binding for 'ace' that lazily creates
+   * the ACE kernel for command-line interface functionality.
+   *
+   * @example
+   * const ace = await app.container.make('ace')
+   * await ace.exec('make:controller', ['UserController'])
+   */
+  protected registerAce() {
+    this.app.container.singleton('ace', async () => {
+      const { createAceKernel } = await import('../modules/ace/create_kernel.js')
+      return createAceKernel(this.app)
+    })
+  }
+
+  /**
+   * Registers the application to the container
+   *
+   * Binds the application instance as both a class binding and an alias.
+   * This allows access to the app instance throughout the container.
+   *
+   * @example
+   * const app = await container.make('app')
+   * const appPath = app.makePath('tmp')
+   */
+  protected registerApp() {
+    this.app.container.singleton(Application, () => this.app)
+    this.app.container.alias('app', Application)
+  }
+
+  /**
+   * Registers the logger class to resolve the default logger
+   *
+   * Creates a singleton binding for the Logger class that resolves
+   * the default logger instance from the logger manager.
+   *
+   * @example
+   * const logger = await container.make(Logger)
+   * logger.info('Application started')
+   */
+  protected registerLogger() {
+    this.app.container.singleton(Logger, async (resolver) => {
+      const loggerManager = await resolver.make('logger')
+      return loggerManager.use()
+    })
+  }
+
+  /**
+   * Registers the logger manager to the container
+   *
+   * Creates a singleton binding for 'logger' that instantiates
+   * the LoggerManager with configuration from config/logger.ts
+   *
+   * @example
+   * const loggerManager = await container.make('logger')
+   * const fileLogger = loggerManager.use('file')
+   */
+  protected registerLoggerManager() {
+    this.app.container.singleton('logger', async () => {
+      const { LoggerManager } = await import('../modules/logger.js')
+      const config = this.app.config.get<any>('logger')
+      return new LoggerManager<any>(config) as LoggerService
+    })
+  }
+
+  /**
+   * Registers the config to the container
+   *
+   * Binds the application's config instance as both a class binding
+   * and an alias, allowing access to configuration values.
+   *
+   * @example
+   * const config = await container.make('config')
+   * const appKey = config.get('app.appKey')
+   */
+  protected registerConfig() {
+    this.app.container.singleton(Config, () => this.app.config)
+    this.app.container.alias('config', Config)
+  }
+
+  /**
+   * Registers emitter service to the container
+   *
+   * Creates a singleton binding for the event emitter that handles
+   * application-wide event dispatching and listening.
+   *
+   * @example
+   * const emitter = await container.make('emitter')
+   * emitter.emit('user:created', { userId: 123 })
+   */
+  protected registerEmitter() {
+    this.app.container.singleton(Emitter, async () => {
+      return new Emitter(this.app) as Emitter<any>
+    })
+    this.app.container.alias('emitter', Emitter)
+  }
+
+  /**
+   * Registers the encryption service with the container
+   *
+   * Creates singleton bindings for both the encryption manager and
+   * the default encryption instance. Resolves configuration from
+   * config/encryption.ts file.
+   *
+   * @example
+   * const encryption = await container.make('encryption')
+   * const encrypted = encryption.encrypt('secret-data')
+   */
+  protected registerEncryption() {
+    this.app.container.singleton('encryption', async () => {
+      const encryptionConfigProvider = this.app.config.get('encryption')
+
+      /**
+       * Resolve config from the provider
+       */
+      const config = await configProvider.resolve<any>(this.app, encryptionConfigProvider)
+      if (!config) {
+        throw new RuntimeException(
+          'Invalid "config/encryption.ts" file. Make sure you are using the "defineConfig" method'
+        )
+      }
+
+      const { EncryptionManager } = await import('../modules/encryption/main.js')
+      return new EncryptionManager(config)
+    })
+
+    this.app.container.singleton(Encryption, async (resolver) => {
+      const encryptionManager = await resolver.make('encryption')
+      return encryptionManager.use()
+    })
+  }
+
+  /**
+   * Registers the HTTP server with the container as a singleton
+   *
+   * Creates a singleton binding for the HTTP server that handles
+   * incoming requests, with dependencies on encryption, emitter,
+   * logger, and HTTP configuration.
+   *
+   * @example
+   * const server = await container.make('server')
+   * server.start()
+   */
+  protected registerServer() {
+    this.app.container.singleton(Server, async (resolver) => {
+      const encryption = await resolver.make(Encryption)
+      const emitter = await resolver.make('emitter')
+      const logger = await resolver.make('logger')
+      const config = this.app.config.get<any>('app.http')
+      return new Server(this.app, encryption, emitter, logger, config)
+    })
+
+    this.app.container.alias('server', Server)
+  }
+
+  /**
+   * Registers router with the container as a singleton
+   *
+   * Creates a singleton binding for the router by getting it from
+   * the HTTP server instance. The router handles URL routing.
+   *
+   * @example
+   * const router = await container.make('router')
+   * router.get('/', ({ response }) => response.send('Hello'))
+   */
+  protected registerRouter() {
+    this.app.container.singleton(Router, async (resolver) => {
+      const server = await resolver.make('server')
+      return server.getRouter()
+    })
+    this.app.container.alias('router', Router)
+  }
+
+  /**
+   * Self construct bodyparser middleware class, since it needs
+   * config that cannot be resolved by the container
+   *
+   * Binds the BodyParserMiddleware with bodyparser configuration
+   * and experimental flags for parsing request bodies.
+   *
+   * @example
+   * const middleware = await container.make(BodyParserMiddleware)
+   * await middleware.handle(ctx, next)
+   */
+  protected registerBodyParserMiddleware() {
+    this.app.container.singleton(BodyParserMiddleware, () => {
+      const config = this.app.config.get<any>('bodyparser')
+      return new BodyParserMiddleware(config, this.app.experimentalFlags)
+    })
+  }
+
+  /**
+   * Registeres singleton instance of the "Dumper" module configured
+   * via the "config/app.ts" file.
+   *
+   * The dumper is used for debugging and variable inspection with
+   * configurable HTML and console output formats.
+   *
+   * @example
+   * const dumper = await container.make('dumper')
+   * dumper.dump({ user: { name: 'John' } })
+   */
+  protected registerDumper() {
+    this.app.container.singleton(Dumper, async () => {
+      const config = this.app.config.get<any>('app.dumper', {})
+      const dumper = new Dumper(this.app)
+
+      if (config.html) {
+        dumper.configureHtmlOutput(config.html)
+      }
+      if (config.console) {
+        dumper.configureAnsiOutput(config.console)
+      }
+
+      return dumper
+    })
+
+    this.app.container.alias('dumper', Dumper)
+  }
+
+  /**
+   * Generates TypeScript type definitions and JSON representation of routes
+   *
+   * Creates route type definitions for better IDE support and a JSON file
+   * containing all registered routes. This is used in development mode for
+   * tooling integration and type-safety.
+   *
+   * @param router - The router instance containing registered routes
+   *
+   * @example
+   * const router = await container.make('router')
+   * await this.emitRoutes(router)
+   * // Generates .adonisjs/server/routes.d.ts and routes.json
+   */
+  protected async emitRoutes(router: Router) {
+    try {
+      await emitRouteTypes(this.app, router)
+
+      /**
+       * The JSON file is how the routes are handed over to the assembler
+       * dev-server, which reads it and then removes it. The codegen command
+       * has no such need, since it passes the routes in memory
+       */
+      const routesJsonPath = this.app.generatedServerPath('routes.json')
+      await writeFile(routesJsonPath, JSON.stringify(router.toJSON()))
+
+      this.app.notify({ isAdonisJS: true, routesFileLocation: routesJsonPath })
+    } catch (error) {
+      console.error(
+        "Unable to generate routes types file due to the following error. This won't impact the dev-server"
+      )
+      console.error(error)
+    }
+  }
+
+  /**
+   * Registers bindings
+   *
+   * Called during the application bootstrap phase to register
+   * all core service bindings with the IoC container.
+   *
+   * @example
+   * const provider = new AppServiceProvider(app)
+   * provider.register() // Registers all core services
+   */
+  register() {
+    this.registerApp()
+    this.registerAce()
+    this.registerDumper()
+    this.registerLoggerManager()
+    this.registerLogger()
+    this.registerConfig()
+    this.registerEmitter()
+    this.registerEncryption()
+    this.registerTestUtils()
+    this.registerServer()
+    this.registerRouter()
+    this.registerBodyParserMiddleware()
+  }
+
+  /**
+   * Boot the service provider
+   *
+   * Called after all providers have been registered. Sets up
+   * event emitter for BaseEvent and adds transform macro to HttpContext.
+   *
+   * @example
+   * await provider.boot()
+   * // Now HttpContext has transform method available
+   */
+  async boot() {
+    BaseEvent.useEmitter(await this.app.container.make('emitter'))
+  }
+
+  /**
+   * Called when the application is ready
+   *
+   * In non-production environments, generates route types and
+   * JSON files for development tooling when router is committed.
+   *
+   * @example
+   * await provider.ready()
+   * // Route types and JSON generated in development
+   */
+  async ready() {
+    if (!this.app.inProduction) {
+      const router = await this.app.container.make('router')
+      if (router.commited) {
+        await this.emitRoutes(router)
+      }
+    }
+  }
+}

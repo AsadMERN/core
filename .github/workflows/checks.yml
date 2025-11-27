@@ -1,0 +1,19 @@
+name: checks
+on:
+  - push
+  - pull_request
+  - workflow_call
+permissions:
+  contents: read
+
+jobs:
+  test:
+    uses: adonisjs/core/.github/workflows/test.yml@288e024b24969357e331d14ccb3e725c35cd5609 # 7.x
+    with:
+      install-pnpm: true
+
+  lint:
+    uses: adonisjs/.github/.github/workflows/lint.yml@7eeb68b240344601ced8ef4fbe0b4dd31df0760b # main
+
+  typecheck:
+    uses: adonisjs/.github/.github/workflows/typecheck.yml@7eeb68b240344601ced8ef4fbe0b4dd31df0760b # main
